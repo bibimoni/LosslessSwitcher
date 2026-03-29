@@ -21,12 +21,15 @@ struct QualityApp: App {
                 .environmentObject(controller.outputDevices)
                 .environmentObject(defaults)
         } label: {
-            if defaults.userPreferIconStatusBarItem {
+            switch defaults.statusBarDisplayMode {
+            case .icon:
                 Image(systemName: "music.note")
                     .padding(.horizontal, 8)
-            }
-            else {
-                SampleRateLabel()
+            case .text:
+                SampleRateLabel(compact: false)
+                    .environmentObject(controller.outputDevices)
+            case .compact:
+                SampleRateLabel(compact: true)
                     .environmentObject(controller.outputDevices)
             }
         }

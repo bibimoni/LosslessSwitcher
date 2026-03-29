@@ -19,10 +19,21 @@ struct MenuView: View {
             
             Divider()
             
-            Button {
-                defaults.userPreferIconStatusBarItem.toggle()
+            Menu {
+                ForEach(StatusBarDisplayMode.allCases, id: \.self) { mode in
+                    Button {
+                        defaults.statusBarDisplayMode = mode
+                    } label: {
+                        HStack {
+                            Text(mode.label)
+                            if defaults.statusBarDisplayMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
             } label: {
-                Text(defaults.statusBarItemTitle)
+                Text("Display Mode")
             }
             
             Button {
