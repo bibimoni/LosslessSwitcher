@@ -32,15 +32,10 @@ struct LsofMediaPathParser {
     /// Subtitle extensions that should never be treated as audio sources.
     static let subtitleExtensions: Set<String> = ["srt", "ass", "ssa", "vtt", "sub"]
 
-    /// Parses `lsof -Ffn` output into media-file URLs, sorted by the number of
-    /// open file descriptors per file (descending). The currently-playing file
-    /// always has the most open fds because mpv opens it for demuxing, decoding,
-    /// and seeking simultaneously. Ties are broken by highest fd number.
-    /// - Parameters:
-    ///   - output: Raw stdout of `lsof -Ffn -p <pid>`.
-    ///   - homeDirectory: The home directory used to expand `~`-prefixed paths.
-    /// - Returns: Media-file URLs sorted by fd count descending.
-    static func mediaPaths(from output: String, homeDirectory: URL) -> [URL] {
+    /// Like `mediaPaths(from:homeDirectory:)` but returns (URL, fdCount) tuples
+    /// sorted by fd count descending. Used by the provider to pick the
+    /// actively-playing file across multiple IINA instances.
+    static func mediaPathsWithFdCounts(from output: String, homeDirectory: URL) -> [(URL, Int)] {
         var fdToPath: [(fd: Int, path: String)] = []
         var currentFd: Int?
 
@@ -68,15 +63,7 @@ struct LsofMediaPathParser {
             guard mediaExtensions.contains(pathExtension) else { continue }
 
             if let fd = currentFd {
-                if let existingIndex = fdToPath.firstIndex(where: { $0.path == expanded }) {
-                    if fd > fdToPath[existingIndex].fd {
-                        fdToPath[existingIndex].fd = fd
-                    }
-                    // Track all fds for this path by counting entries.
-                    fdToPath.append((fd: fd, path: expanded))
-                } else {
-                    fdToPath.append((fd: fd, path: expanded))
-                }
+                fdToPath.append((fd: fd, path: expanded))
             }
         }
 
@@ -87,7 +74,6 @@ struct LsofMediaPathParser {
             pathStats[entry.path] = (count: current.count + 1, maxFd: max(current.maxFd, entry.fd))
         }
 
-        // Sort by fd count descending, then by highest fd descending.
         let sorted = pathStats.sorted {
             if $0.value.count != $1.value.count {
                 return $0.value.count > $1.value.count
@@ -95,7 +81,7 @@ struct LsofMediaPathParser {
             return $0.value.maxFd > $1.value.maxFd
         }
 
-        return sorted.map { URL(fileURLWithPath: $0.key) }
+        return sorted.map { (URL(fileURLWithPath: $0.key), $0.value.count) }
     }
 }
 
@@ -172,6 +158,12 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             return
         }
 
+        // Collect candidates from ALL IINA instances, then pick the one whose
+        // file has the most open file descriptors. The actively-playing file
+        // always has more fds (demuxer + decoder + seeking) than a paused one.
+        // Ties are broken by checking mpv IPC `pause` property.
+        var bestCandidate: (url: URL, metadata: AudioMetadata, fdCount: Int, isPlaying: Bool)?
+
         for pid in pids {
             if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
                 continue
@@ -180,14 +172,29 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
 
             guard let output = Self.runLsof(pid: pid) else { continue }
             let home = FileManager.default.homeDirectoryForCurrentUser
-            let mediaURLs = LsofMediaPathParser.mediaPaths(from: output, homeDirectory: home)
-            // mediaPaths is sorted by highest fd first — the most recently
-            // opened file is the one IINA is currently playing.
-            guard let url = mediaURLs.first else { continue }
-            guard let metadata = AudioMetadataReader.read(url: url) else { continue }
-            emitCandidate(url: url, metadata: metadata, now: now)
-            break
+            let mediaWithCounts = LsofMediaPathParser.mediaPathsWithFdCounts(from: output, homeDirectory: home)
+
+            // Check if this IINA instance is actively playing (not paused)
+            // via its mpv IPC socket.
+            let isPlaying = Self.isIINAPlaying(pid: pid)
+
+            for (url, fdCount) in mediaWithCounts {
+                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
+                // Prefer playing instances. Among playing instances, pick most fds.
+                if bestCandidate == nil {
+                    bestCandidate = (url, metadata, fdCount, isPlaying)
+                } else if isPlaying && !bestCandidate!.isPlaying {
+                    // Playing instance always wins over paused.
+                    bestCandidate = (url, metadata, fdCount, isPlaying)
+                } else if isPlaying == bestCandidate!.isPlaying && fdCount > bestCandidate!.fdCount {
+                    // Same play state — pick more fds.
+                    bestCandidate = (url, metadata, fdCount, isPlaying)
+                }
+            }
         }
+
+        guard let best = bestCandidate else { return }
+        emitCandidate(url: best.url, metadata: best.metadata, now: now)
     }
 
     private func emitCandidate(url: URL, metadata: AudioMetadata, now: Date) {
@@ -242,5 +249,100 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)
+    }
+
+    /// Checks if an IINA instance is actively playing (not paused) by querying
+    /// its mpv IPC socket. Falls back to `true` if the socket can't be found
+    /// or the query fails — this avoids suppressing detection when IPC is
+    /// unavailable (e.g. IINA too old or IPC disabled).
+    static func isIINAPlaying(pid: pid_t) -> Bool {
+        // Find mpv IPC sockets owned by this PID.
+        guard let sockets = findMpvSockets(forPid: pid), !sockets.isEmpty else {
+            return true // Can't determine — assume playing.
+        }
+
+        for socket in sockets {
+            // Query the `pause` property via mpv IPC JSON protocol.
+            let response = queryMpvIPC(socketPath: socket, command: "get_property", property: "pause")
+            if let data = response.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dataValue = json["data"] as? Bool {
+                // `pause` is false when playing, true when paused.
+                return !dataValue
+            }
+        }
+
+        return true // Query failed — assume playing.
+    }
+
+    /// Finds mpv IPC socket paths for a given IINA PID by listing /tmp and
+    /// checking which sockets are held open by that PID.
+    private static func findMpvSockets(forPid pid: pid_t) -> [String]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-U", "-F", "n", "-a", "-p", String(pid)]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return nil }
+
+        // Parse lines starting with 'n' that contain "mpv-ipc-handle".
+        return output.components(separatedBy: .newlines)
+            .filter { $0.hasPrefix("n") && $0.contains("mpv-ipc-handle") }
+            .map { String($0.dropFirst()) }
+    }
+
+    /// Sends a JSON command to an mpv IPC Unix socket and returns the response.
+    private static func queryMpvIPC(socketPath: String, command: String, property: String) -> String {
+        let request = "{\"command\":[\"\(command)\",\"\(property)\"]}\n"
+        guard let requestData = request.data(using: .utf8) else { return "" }
+
+        let fd = Darwin.socket(Darwin.AF_UNIX, Darwin.SOCK_STREAM, 0)
+        guard fd >= 0 else { return "" }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(Darwin.AF_UNIX)
+        socketPath.withCString { cPath in
+            withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
+                pathPtr.withMemoryRebound(to: CChar.self, capacity: 104) { cCharPtr in
+                    _ = Darwin.strncpy(cCharPtr, cPath, 103)
+                }
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else { return "" }
+
+        // Set a 1-second timeout so we don't hang if the socket is stale.
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        Darwin.setsockopt(fd, Darwin.SOL_SOCKET, Darwin.SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        _ = requestData.withUnsafeBytes { buffer in
+            Darwin.send(fd, buffer.baseAddress, buffer.count, 0)
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let bytesRead = buffer.withUnsafeMutableBufferPointer { ptr in
+            Darwin.recv(fd, ptr.baseAddress, ptr.count, 0)
+        }
+        if bytesRead > 0 {
+            return String(bytes: buffer.prefix(bytesRead), encoding: .utf8) ?? ""
+        }
+        return ""
     }
 }
