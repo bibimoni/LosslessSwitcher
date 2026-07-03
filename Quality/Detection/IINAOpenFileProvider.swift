@@ -1,0 +1,228 @@
+//
+//  IINAOpenFileProvider.swift
+//  Quality
+//
+//  Discovers the currently-opened local media file in the IINA process and
+//  emits a DetectionCandidate built from the file's audio metadata. Does not
+//  require IINA `audio-exclusive` or `audio-device` mpv options — it reads the
+//  source file directly via AudioMetadataReader.
+//
+
+import Combine
+import Foundation
+import AppKit
+import OSLog
+
+/// Pure parser for `/usr/sbin/lsof -Fn -p <pid>` output. Extracted as a
+/// standalone, side-effect-free helper so it can be unit-tested with fixture
+/// strings without spawning processes.
+struct LsofMediaPathParser {
+    /// Extensions we treat as playable media IINA might have open.
+    static let mediaExtensions: Set<String> = [
+        "flac", "wav", "aif", "aiff", "m4a", "mp3", "ogg", "opus", "mp4", "mkv", "mov"
+    ]
+
+    /// Paths that begin with any of these prefixes are IINA-internal resources
+    /// (app bundle, support files) and must be excluded from candidates.
+    static let excludedPathPrefixes: [String] = [
+        "/Applications/IINA.app",
+        "/Library/Application Support/com.colliderli.iina",
+    ]
+
+    /// Subtitle extensions that should never be treated as audio sources.
+    static let subtitleExtensions: Set<String> = ["srt", "ass", "ssa", "vtt", "sub"]
+
+    /// Parses `lsof -Fn` output into media-file URLs.
+    /// - Parameters:
+    ///   - output: Raw stdout of `lsof -Fn -p <pid>`.
+    ///   - homeDirectory: The home directory used to expand `~`-prefixed paths
+    ///     that lsof sometimes emits. Pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: Distinct media-file URLs, in the order they first appeared.
+    static func mediaPaths(from output: String, homeDirectory: URL) -> [URL] {
+        var seen = Set<String>()
+        var results: [URL] = []
+
+        for line in output.components(separatedBy: .newlines) {
+            // `lsof -Fn` prefixes file paths with `n`.
+            guard line.hasPrefix("n") else { continue }
+            let raw = String(line.dropFirst())
+            if raw.isEmpty { continue }
+
+            // Expand a leading `~` to the supplied home directory.
+            let expanded: String
+            if raw.hasPrefix("~") {
+                expanded = homeDirectory.path + String(raw.dropFirst())
+            } else {
+                expanded = raw
+            }
+
+            // Skip IINA-internal resources.
+            if excludedPathPrefixes.contains(where: { expanded.hasPrefix($0) }) { continue }
+
+            // Skip subtitle-only files.
+            let pathExtension = (expanded as NSString).pathExtension.lowercased()
+            if pathExtension.isEmpty { continue }
+            if subtitleExtensions.contains(pathExtension) { continue }
+            guard mediaExtensions.contains(pathExtension) else { continue }
+
+            // De-duplicate by path string.
+            if seen.contains(expanded) { continue }
+            seen.insert(expanded)
+            results.append(URL(fileURLWithPath: expanded))
+        }
+
+        return results
+    }
+}
+
+/// Provider that watches the IINA process for open media files and publishes
+/// sample-rate candidates derived from the file's own audio metadata.
+final class IINAOpenFileProvider: AudioSampleRateProvider {
+    let identifier = "IINAOpenFileProvider"
+
+    private let candidateSubject = PassthroughSubject<DetectionCandidate, Never>()
+    var candidatePublisher: AnyPublisher<DetectionCandidate, Never> {
+        candidateSubject.eraseToAnyPublisher()
+    }
+
+    /// IINA's bundle identifier.
+    static let iinaBundleID = "com.colliderli.iina"
+
+    /// Minimum interval between `lsof` invocations for a given PID, to keep
+    /// resource usage bounded during continuous playback.
+    static let lsofInterval: TimeInterval = 2.0
+
+    /// Candidate expiry window. A candidate remains valid for this long after
+    /// it was emitted before the reducer treats it as stale.
+    static let candidateTTL: TimeInterval = 4.0
+
+    /// Suppression window: an identical (path, sampleRate, bitDepth) tuple is
+    /// not re-emitted within this interval, preventing repeated same-file
+    /// candidate churn during continuous IINA playback.
+    static let duplicateSuppressionWindow: TimeInterval = 10.0
+
+    private var timer: DispatchSourceTimer?
+    private let queue = DispatchQueue(label: "com.vincent-neo.LosslessSwitcher.iina-provider", qos: .utility)
+    private var lastLsofAt: [pid_t: Date] = [:]
+
+    // Task 9 — duplicate-suppression cache.
+    private var lastEmittedPath: String?
+    private var lastEmittedSampleRate: Double?
+    private var lastEmittedBitDepth: Int?
+    private var lastEmittedAt: Date?
+
+    init() {}
+
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1.0, repeating: Self.lsofInterval)
+        timer.setEventHandler { [weak self] in
+            self?.pollOnce()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.cancel()
+        timer = nil
+        queue.async { [weak self] in
+            self?.lastLsofAt.removeAll()
+            self?.lastEmittedPath = nil
+            self?.lastEmittedSampleRate = nil
+            self?.lastEmittedBitDepth = nil
+            self?.lastEmittedAt = nil
+        }
+    }
+
+    private func pollOnce() {
+        let now = Date()
+        let pids = Self.runningIINAPIDs()
+        guard !pids.isEmpty else { return }
+
+        for pid in pids {
+            // Throttle lsof invocations per PID.
+            if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
+                continue
+            }
+            lastLsofAt[pid] = now
+
+            guard let output = Self.runLsof(pid: pid) else { continue }
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let mediaPaths = LsofMediaPathParser.mediaPaths(from: output, homeDirectory: home)
+            for url in mediaPaths {
+                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
+                emitCandidate(url: url, metadata: metadata, now: now)
+                // Only the first readable media file per poll wins; this matches
+                // the plan's "first stable candidate path that returns a sample rate".
+                break
+            }
+        }
+    }
+
+    private func emitCandidate(url: URL, metadata: AudioMetadata, now: Date) {
+        let path = url.path
+
+        // Task 9 — suppress identical re-emissions within the suppression window.
+        let isSameTuple = (lastEmittedPath == path)
+            && (lastEmittedSampleRate.map { abs($0 - metadata.sampleRate) < 1.0 } ?? false)
+            && (lastEmittedBitDepth == metadata.bitDepth)
+        if let lastAt = lastEmittedAt, isSameTuple, now.timeIntervalSince(lastAt) < Self.duplicateSuppressionWindow {
+            return
+        }
+        lastEmittedPath = path
+        lastEmittedSampleRate = metadata.sampleRate
+        lastEmittedBitDepth = metadata.bitDepth
+        lastEmittedAt = now
+
+        let stat = CMPlayerStats(
+            sampleRate: metadata.sampleRate,
+            bitDepth: metadata.bitDepth ?? 24,
+            date: now,
+            priority: 7,
+            processName: "IINA",
+            trackName: url.lastPathComponent
+        )
+
+        let candidate = DetectionCandidate(
+            stats: stat,
+            sourceKind: .iinaLocalFile,
+            confidence: 7,
+            expiresAt: now.addingTimeInterval(Self.candidateTTL),
+            diagnostic: "IINA local file: \(url.lastPathComponent) [\(metadata.codecDescription)]"
+        )
+
+        Logger.streamer.info("[IINAProvider] \(candidate.diagnostic, privacy: .public) sr=\(metadata.sampleRate, privacy: .public)")
+        candidateSubject.send(candidate)
+    }
+
+    // MARK: - Process discovery (extracted for testability of the seam)
+
+    /// Returns PIDs of running IINA apps by bundle id. Empty when IINA is not running.
+    static func runningIINAPIDs() -> [pid_t] {
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: iinaBundleID)
+        return apps.compactMap { $0.processIdentifier }
+    }
+
+    /// Runs `/usr/sbin/lsof -Fn -p <pid>` and returns its stdout, or nil on failure.
+    static func runLsof(pid: pid_t) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-Fn", "-p", String(pid)]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe() // discard stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+}

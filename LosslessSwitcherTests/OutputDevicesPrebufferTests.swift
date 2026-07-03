@@ -24,6 +24,10 @@ final class TestOutputDevicesNoMonitoring: OutputDevices {
     override func startMusicAppMonitoring() {
         // 测试中禁用 Music 通知监听，避免与测试用例耦合
     }
+
+    override func startLogStreamer() {
+        // 测试中禁用真实日志流和 provider，避免系统日志干扰注入的测试数据
+    }
 }
 
 final class TestOutputDevicesWithMonitoring: OutputDevices {
@@ -39,6 +43,10 @@ final class TestOutputDevicesWithMonitoring: OutputDevices {
 
     override func startHeartbeat() {
         // 测试中禁用心跳，避免后台触发 switchLatestSampleRate 影响结果
+    }
+
+    override func startLogStreamer() {
+        // 测试中禁用真实日志流和 provider，避免系统日志干扰注入的测试数据
     }
 }
 
@@ -64,6 +72,10 @@ final class TestOutputDevicesFormatSelection: OutputDevices {
         // 测试中禁用 Music 通知监听，避免与测试用例耦合
     }
 
+    override func startLogStreamer() {
+        // 测试中禁用真实日志流和 provider，避免系统日志干扰注入的测试数据
+    }
+
     override func getFormats(bestStat: CMPlayerStats, device: AudioDevice) -> [AudioStreamBasicDescription]? {
         return injectedFormats
     }
@@ -74,6 +86,7 @@ final class TestOutputDevicesFormatSelection: OutputDevices {
 
     override func updateSampleRate(_ sampleRate: Float64, bitDepth: Int?) {
         updatedSampleRate = sampleRate
+        previousSampleRate = sampleRate
     }
 }
 
@@ -91,8 +104,13 @@ final class TestOutputDevicesPrebufferApply: OutputDevices {
     override func startHeartbeat() {
     }
 
+    override func startLogStreamer() {
+        // 测试中禁用真实日志流和 provider
+    }
+
     override func updateSampleRate(_ sampleRate: Float64, bitDepth: Int?) {
         updatedSampleRate = sampleRate
+        previousSampleRate = sampleRate
     }
 }
 
@@ -104,8 +122,12 @@ final class TestOutputDevicesMusicDowngrade: OutputDevices {
     override func getDeviceSampleRate() {}
     override func startHeartbeat() {}
     override func startMusicAppMonitoring() {}
+    override func startLogStreamer() {
+        // 测试中禁用真实日志流和 provider
+    }
     override func updateSampleRate(_ sampleRate: Float64, bitDepth: Int?) {
         updatedSampleRate = sampleRate
+        previousSampleRate = sampleRate
     }
 }
 
@@ -115,6 +137,8 @@ final class OutputDevicesPrebufferTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(1.0))
         LogStreamer.shared.stop()
         LogStreamer.shared.resetDebugStateForTests()
+        LogStreamer.shared.resetProviderStateForTests()
+        SampleRatePolicy.shared.resetStateForTests()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
     }
 
@@ -568,7 +592,9 @@ final class OutputDevicesPrebufferTests: XCTestCase {
     }
 
     private func readPendingStat(in devices: OutputDevices) -> CMPlayerStats? {
-        return readValue(named: "pendingNextTrackStat", from: devices)
+        // pendingNextTrackStat was migrated from OutputDevices to
+        // SampleRatePolicy.shared; read it from the policy singleton.
+        return readValue(named: "pendingNextTrackStat", from: SampleRatePolicy.shared)
     }
 
     private func readValue<T>(named name: String, from object: Any) -> T? {

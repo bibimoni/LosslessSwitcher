@@ -27,12 +27,46 @@ class LogStreamer: ObservableObject {
     private var currentTrackSignature: String?
     private var currentTrackStartTime: Date?
     
-    private var parsers: [LogParser] = [CoreAudioParser(), CoreMediaParser()]
-    
+    private var parsers: [LogParser] = [CoreAudioParser(), BrowserCoreMediaParser(), CoreMediaParser()]
+
+    // MARK: - Provider aggregation (Task 4)
+    private var providers: [AudioSampleRateProvider] = []
+    private var providerCancellables: [AnyCancellable] = []
+    private var candidateReducer = DetectionCandidateReducer()
+    private var registeredProviderIDs = Set<String>()
+    #if DEBUG
+    /// When false, `start()` will not start registered providers. Set to false
+    /// by `resetProviderStateForTests()` so that `OutputDevices.init()` calling
+    /// `LogStreamer.shared.start()` during tests does not spawn the IINA
+    /// provider's lsof timer against a real running IINA process.
+    private var providersShouldStart = true
+    #endif
+
     private init() {}
 
     func register(parser: LogParser) {
         parsers.append(parser)
+    }
+
+    /// Registers an external sample-rate provider. Duplicate identifiers are
+    /// silently ignored so repeated `OutputDevices` construction (including in
+    /// tests) cannot stack the same provider.
+    func register(provider: AudioSampleRateProvider) {
+        if registeredProviderIDs.contains(provider.identifier) { return }
+        registeredProviderIDs.insert(provider.identifier)
+        providers.append(provider)
+        let cancellable = provider.candidatePublisher.sink { [weak self] candidate in
+            self?.appendCandidate(candidate)
+        }
+        providerCancellables.append(cancellable)
+    }
+
+    /// Routes a provider-emitted candidate through the reducer before it can
+    /// reach `latestStats`. Stale and duplicate same-rate lower-confidence
+    /// candidates are rejected here.
+    func appendCandidate(_ candidate: DetectionCandidate) {
+        guard candidateReducer.shouldAccept(candidate) else { return }
+        appendDebugStat(candidate.stats)
     }
 
 #if DEBUG
@@ -43,6 +77,21 @@ class LogStreamer: ObservableObject {
         currentTrackID = nil
         currentTrackName = nil
         currentTrackSignature = nil
+    }
+
+    /// Clears all registered providers, their cancellables, and the reducer
+    /// state. Also sets `providersShouldStart = false` so that the subsequent
+    /// `OutputDevices.init()` → `LogStreamer.shared.start()` call does not
+    /// start the IINA provider's lsof timer during tests (which would emit real
+    /// candidates if IINA happens to be running on the test machine).
+    func resetProviderStateForTests() {
+        providers.forEach { $0.stop() }
+        providers.removeAll()
+        providerCancellables.forEach { $0.cancel() }
+        providerCancellables.removeAll()
+        registeredProviderIDs.removeAll()
+        candidateReducer.reset()
+        providersShouldStart = false
     }
 #endif
 
@@ -173,13 +222,21 @@ class LogStreamer: ObservableObject {
         do {
             try process.run()
             Logger.streamer.info("[LogStreamer] Log stream started successfully.")
+            #if DEBUG
+            if providersShouldStart {
+                providers.forEach { $0.start() }
+            }
+            #else
+            providers.forEach { $0.start() }
+            #endif
         } catch {
             Logger.streamer.error("[LogStreamer] Failed to run log process: \(error, privacy: .public)")
         }
     }
-    
+
     func stop() {
         isExplicitlyStopped = true
+        providers.forEach { $0.stop() }
         stopProcess()
     }
 
