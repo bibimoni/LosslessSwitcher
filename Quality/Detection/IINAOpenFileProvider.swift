@@ -158,11 +158,8 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             return
         }
 
-        // Collect candidates from ALL IINA instances, then pick the one whose
-        // file has the most open file descriptors. The actively-playing file
-        // always has more fds (demuxer + decoder + seeking) than a paused one.
-        // Ties are broken by checking mpv IPC `pause` property.
-        var bestCandidate: (url: URL, metadata: AudioMetadata, fdCount: Int, isPlaying: Bool)?
+        // Collect candidates from ALL IINA instances.
+        var bestCandidate: (url: URL, metadata: AudioMetadata, isPlaying: Bool)?
 
         for pid in pids {
             if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
@@ -170,25 +167,32 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             }
             lastLsofAt[pid] = now
 
+            // PRIORITY 1: Query mpv IPC for the exact playing file path.
+            // This is the most reliable method — mpv knows which file it's
+            // actively decoding, regardless of how many files lsof shows open.
+            let isPlaying = Self.isIINAPlaying(pid: pid)
+            if isPlaying, let path = Self.queryMpvPlayingPath(pid: pid) {
+                let url = URL(fileURLWithPath: path)
+                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
+                // Playing instance with valid metadata — use it immediately.
+                if bestCandidate == nil || isPlaying {
+                    bestCandidate = (url, metadata, isPlaying)
+                }
+                continue
+            }
+
+            // PRIORITY 2: Fall back to lsof fd-count heuristic when IPC fails
+            // (e.g. IINA too old, IPC disabled, or property unavailable).
             guard let output = Self.runLsof(pid: pid) else { continue }
             let home = FileManager.default.homeDirectoryForCurrentUser
             let mediaWithCounts = LsofMediaPathParser.mediaPathsWithFdCounts(from: output, homeDirectory: home)
 
-            // Check if this IINA instance is actively playing (not paused)
-            // via its mpv IPC socket.
-            let isPlaying = Self.isIINAPlaying(pid: pid)
-
-            for (url, fdCount) in mediaWithCounts {
+            for (url, _) in mediaWithCounts {
                 guard let metadata = AudioMetadataReader.read(url: url) else { continue }
-                // Prefer playing instances. Among playing instances, pick most fds.
                 if bestCandidate == nil {
-                    bestCandidate = (url, metadata, fdCount, isPlaying)
+                    bestCandidate = (url, metadata, isPlaying)
                 } else if isPlaying && !bestCandidate!.isPlaying {
-                    // Playing instance always wins over paused.
-                    bestCandidate = (url, metadata, fdCount, isPlaying)
-                } else if isPlaying == bestCandidate!.isPlaying && fdCount > bestCandidate!.fdCount {
-                    // Same play state — pick more fds.
-                    bestCandidate = (url, metadata, fdCount, isPlaying)
+                    bestCandidate = (url, metadata, isPlaying)
                 }
             }
         }
@@ -256,23 +260,41 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
     /// or the query fails — this avoids suppressing detection when IPC is
     /// unavailable (e.g. IINA too old or IPC disabled).
     static func isIINAPlaying(pid: pid_t) -> Bool {
-        // Find mpv IPC sockets owned by this PID.
         guard let sockets = findMpvSockets(forPid: pid), !sockets.isEmpty else {
-            return true // Can't determine — assume playing.
+            return true
         }
-
         for socket in sockets {
-            // Query the `pause` property via mpv IPC JSON protocol.
-            let response = queryMpvIPC(socketPath: socket, command: "get_property", property: "pause")
+            let response = queryMpvIPC(socketPath: socket, property: "pause")
             if let data = response.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let dataValue = json["data"] as? Bool {
-                // `pause` is false when playing, true when paused.
                 return !dataValue
             }
         }
+        return true
+    }
 
-        return true // Query failed — assume playing.
+    /// Queries mpv IPC for the `path` property — the exact file currently being
+    /// played. Returns nil if IPC is unavailable or the property is unavailable
+    /// (e.g. idle state, no file loaded).
+    static func queryMpvPlayingPath(pid: pid_t) -> String? {
+        guard let sockets = findMpvSockets(forPid: pid), !sockets.isEmpty else {
+            return nil
+        }
+        for socket in sockets {
+            let response = queryMpvIPC(socketPath: socket, property: "path")
+            if let data = response.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let path = json["data"] as? String,
+               !path.isEmpty {
+                // Expand ~ to home directory.
+                if path.hasPrefix("~") {
+                    return FileManager.default.homeDirectoryForCurrentUser.path + String(path.dropFirst())
+                }
+                return path
+            }
+        }
+        return nil
     }
 
     /// Finds mpv IPC socket paths for a given IINA PID by listing /tmp and
@@ -302,9 +324,9 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             .map { String($0.dropFirst()) }
     }
 
-    /// Sends a JSON command to an mpv IPC Unix socket and returns the response.
-    private static func queryMpvIPC(socketPath: String, command: String, property: String) -> String {
-        let request = "{\"command\":[\"\(command)\",\"\(property)\"]}\n"
+    /// Sends a `get_property` command to an mpv IPC Unix socket and returns the response.
+    private static func queryMpvIPC(socketPath: String, property: String) -> String {
+        let request = "{\"command\":[\"get_property\",\"\(property)\"]}\n"
         guard let requestData = request.data(using: .utf8) else { return "" }
 
         let fd = Darwin.socket(Darwin.AF_UNIX, Darwin.SOCK_STREAM, 0)
