@@ -292,8 +292,13 @@ class LogStreamer: ObservableObject {
     }
 
     private func updateTrackHistory(with stat: CMPlayerStats) {
-        guard isMusicProcess(stat.processName) || currentTrackKey() != nil else { return }
-        let key = currentTrackKey() ?? stat.trackName ?? "Unknown"
+        // Allow Music process tracks, any track set via Music notifications,
+        // and any stat that carries its own trackName (IINA file name, browser
+        // line, etc.) so the debug menu shows all detected sources.
+        guard isMusicProcess(stat.processName)
+                || currentTrackKey() != nil
+                || (stat.trackName?.isEmpty == false) else { return }
+        let key = currentTrackKey() ?? stat.trackName ?? stat.processName ?? "Unknown"
         let name = currentTrackName ?? stat.trackName ?? "Unknown"
 
         upsertTrackEntry(

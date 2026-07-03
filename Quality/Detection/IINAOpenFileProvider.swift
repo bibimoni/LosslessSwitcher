@@ -88,9 +88,9 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
     /// IINA's bundle identifier.
     static let iinaBundleID = "com.colliderli.iina"
 
-    /// Minimum interval between `lsof` invocations for a given PID, to keep
-    /// resource usage bounded during continuous playback.
-    static let lsofInterval: TimeInterval = 2.0
+    /// Minimum interval between `lsof` invocations for a given PID. Kept short
+    /// so IINA playback is detected within ~0.5s of opening a file.
+    static let lsofInterval: TimeInterval = 0.5
 
     /// Candidate expiry window. A candidate remains valid for this long after
     /// it was emitted before the reducer treats it as stale.
@@ -115,7 +115,7 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
 
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1.0, repeating: Self.lsofInterval)
+        timer.schedule(deadline: .now() + 0.3, repeating: Self.lsofInterval)
         timer.setEventHandler { [weak self] in
             self?.pollOnce()
         }
@@ -141,7 +141,6 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
         guard !pids.isEmpty else { return }
 
         for pid in pids {
-            // Throttle lsof invocations per PID.
             if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
                 continue
             }
@@ -153,8 +152,6 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             for url in mediaPaths {
                 guard let metadata = AudioMetadataReader.read(url: url) else { continue }
                 emitCandidate(url: url, metadata: metadata, now: now)
-                // Only the first readable media file per poll wins; this matches
-                // the plan's "first stable candidate path that returns a sample rate".
                 break
             }
         }
@@ -192,7 +189,7 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             diagnostic: "IINA local file: \(url.lastPathComponent) [\(metadata.codecDescription)]"
         )
 
-        Logger.streamer.info("[IINAProvider] \(candidate.diagnostic, privacy: .public) sr=\(metadata.sampleRate, privacy: .public)")
+        Logger.streamer.info("[IINAProvider] DETECTED file=\(url.lastPathComponent, privacy: .public) sr=\(metadata.sampleRate, privacy: .public) codec=\(metadata.codecDescription, privacy: .public) bitDepth=\(metadata.bitDepth.map(String.init) ?? "?", privacy: .public)")
         candidateSubject.send(candidate)
     }
 
