@@ -256,9 +256,17 @@ class LogStreamer: ObservableObject {
         let lines = output.components(separatedBy: .newlines)
         for line in lines {
             if line.isEmpty { continue }
-            
+
             for parser in parsers {
                 if let stat = parser.parse(line: line, currentTrackName: self.currentTrackName) {
+                    // If a high-priority provider (e.g. IINA local file, priority 7)
+                    // recently emitted a candidate, suppress lower-priority log-stream
+                    // stats to prevent oscillation between provider and log sources.
+                    if let last = candidateReducer.lastAccepted,
+                       last.expiresAt >= Date(),
+                       last.confidence > stat.priority {
+                        continue
+                    }
                     self.appendDebugStat(stat)
                     break
                 }
