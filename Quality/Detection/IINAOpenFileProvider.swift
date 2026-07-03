@@ -32,26 +32,20 @@ struct LsofMediaPathParser {
     /// Subtitle extensions that should never be treated as audio sources.
     static let subtitleExtensions: Set<String> = ["srt", "ass", "ssa", "vtt", "sub"]
 
-    /// Parses `lsof -Fn` output into media-file URLs. Accepts an optional
-    /// `lsof -Ffn` output (with fd numbers) to sort by highest fd number —
-    /// the most recently opened file has the highest fd.
+    /// Parses `lsof -Ffn` output into media-file URLs, sorted by the number of
+    /// open file descriptors per file (descending). The currently-playing file
+    /// always has the most open fds because mpv opens it for demuxing, decoding,
+    /// and seeking simultaneously. Ties are broken by highest fd number.
     /// - Parameters:
-    ///   - output: Raw stdout of `lsof -Fn -p <pid>` or `lsof -Ffn -p <pid>`.
+    ///   - output: Raw stdout of `lsof -Ffn -p <pid>`.
     ///   - homeDirectory: The home directory used to expand `~`-prefixed paths.
-    /// - Returns: Media-file URLs. When fd info is present, sorted by highest fd
-    ///   descending (most recently opened first). Otherwise, in first-seen order.
+    /// - Returns: Media-file URLs sorted by fd count descending.
     static func mediaPaths(from output: String, homeDirectory: URL) -> [URL] {
-        // Check if output includes fd numbers (lines starting with 'f').
-        let hasFdInfo = output.contains("\nf")
         var fdToPath: [(fd: Int, path: String)] = []
-        var seen = Set<String>()
-        var orderedResults: [URL] = []
-
         var currentFd: Int?
 
         for line in output.components(separatedBy: .newlines) {
             if line.hasPrefix("f") {
-                // File descriptor number line.
                 currentFd = Int(line.dropFirst())
                 continue
             }
@@ -73,27 +67,35 @@ struct LsofMediaPathParser {
             if subtitleExtensions.contains(pathExtension) { continue }
             guard mediaExtensions.contains(pathExtension) else { continue }
 
-            if hasFdInfo, let fd = currentFd {
-                // Track the highest fd per path.
+            if let fd = currentFd {
                 if let existingIndex = fdToPath.firstIndex(where: { $0.path == expanded }) {
                     if fd > fdToPath[existingIndex].fd {
                         fdToPath[existingIndex].fd = fd
                     }
+                    // Track all fds for this path by counting entries.
+                    fdToPath.append((fd: fd, path: expanded))
                 } else {
                     fdToPath.append((fd: fd, path: expanded))
                 }
-            } else {
-                if seen.contains(expanded) { continue }
-                seen.insert(expanded)
-                orderedResults.append(URL(fileURLWithPath: expanded))
             }
         }
 
-        if hasFdInfo {
-            // Sort by fd descending — most recently opened file first.
-            return fdToPath.sorted { $0.fd > $1.fd }.map { URL(fileURLWithPath: $0.path) }
+        // Count fds per path, keeping the highest fd for tiebreaking.
+        var pathStats: [String: (count: Int, maxFd: Int)] = [:]
+        for entry in fdToPath {
+            let current = pathStats[entry.path] ?? (count: 0, maxFd: 0)
+            pathStats[entry.path] = (count: current.count + 1, maxFd: max(current.maxFd, entry.fd))
         }
-        return orderedResults
+
+        // Sort by fd count descending, then by highest fd descending.
+        let sorted = pathStats.sorted {
+            if $0.value.count != $1.value.count {
+                return $0.value.count > $1.value.count
+            }
+            return $0.value.maxFd > $1.value.maxFd
+        }
+
+        return sorted.map { URL(fileURLWithPath: $0.key) }
     }
 }
 
