@@ -191,20 +191,6 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
     }
 
     private func emitCandidate(url: URL, metadata: AudioMetadata, now: Date) {
-        let path = url.path
-
-        // Task 9 — suppress identical re-emissions within the suppression window.
-        let isSameTuple = (lastEmittedPath == path)
-            && (lastEmittedSampleRate.map { abs($0 - metadata.sampleRate) < 1.0 } ?? false)
-            && (lastEmittedBitDepth == metadata.bitDepth)
-        if let lastAt = lastEmittedAt, isSameTuple, now.timeIntervalSince(lastAt) < Self.duplicateSuppressionWindow {
-            return
-        }
-        lastEmittedPath = path
-        lastEmittedSampleRate = metadata.sampleRate
-        lastEmittedBitDepth = metadata.bitDepth
-        lastEmittedAt = now
-
         let stat = CMPlayerStats(
             sampleRate: metadata.sampleRate,
             bitDepth: metadata.bitDepth ?? 24,

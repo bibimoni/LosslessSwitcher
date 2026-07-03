@@ -26,12 +26,16 @@ struct DetectionCandidateReducer {
         let oldStats = current.stats
         let isNewer = newStats.date >= oldStats.date
         let isHigherConfidence = candidate.confidence > current.confidence
+        let isSameConfidence = candidate.confidence == current.confidence
         let isDifferentRate = abs(newStats.sampleRate - oldStats.sampleRate) >= 100
 
-        // Accept when the new candidate is strictly more confident, OR when it is
-        // both newer and represents a materially different sample rate. Same-rate
-        // lower-or-equal-confidence duplicates are suppressed to avoid flashing.
-        let accept = isHigherConfidence || (isNewer && isDifferentRate)
+        // Accept when:
+        // - strictly more confident, OR
+        // - newer AND materially different rate, OR
+        // - same confidence (refresh TTL to keep high-priority providers alive)
+        //   This prevents lower-priority log-stream stats from taking over
+        //   while a high-priority provider (IINA) is actively playing.
+        let accept = isHigherConfidence || (isNewer && isDifferentRate) || isSameConfidence
         if accept { lastAccepted = candidate }
         return accept
     }

@@ -267,6 +267,15 @@ class LogStreamer: ObservableObject {
                        last.confidence > stat.priority {
                         continue
                     }
+                    // Also suppress log-stream stats that have the SAME sample rate
+                    // but different bit depth than the active provider candidate, to
+                    // prevent bit-depth oscillation.
+                    if let last = candidateReducer.lastAccepted,
+                       last.expiresAt >= Date(),
+                       last.confidence > stat.priority - 1,
+                       abs(last.stats.sampleRate - stat.sampleRate) < 100 {
+                        continue
+                    }
                     self.appendDebugStat(stat)
                     break
                 }
