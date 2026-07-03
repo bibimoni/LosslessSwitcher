@@ -158,8 +158,7 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             return
         }
 
-        // Collect candidates from ALL IINA instances.
-        var bestCandidate: (url: URL, metadata: AudioMetadata, isPlaying: Bool)?
+        var bestCandidate: (url: URL, metadata: AudioMetadata)?
 
         for pid in pids {
             if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
@@ -168,31 +167,28 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             lastLsofAt[pid] = now
 
             // PRIORITY 1: Query mpv IPC for the exact playing file path.
-            // This is the most reliable method — mpv knows which file it's
-            // actively decoding, regardless of how many files lsof shows open.
-            let isPlaying = Self.isIINAPlaying(pid: pid)
-            if isPlaying, let path = Self.queryMpvPlayingPath(pid: pid) {
-                let url = URL(fileURLWithPath: path)
-                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
-                // Playing instance with valid metadata — use it immediately.
-                if bestCandidate == nil || isPlaying {
-                    bestCandidate = (url, metadata, isPlaying)
+            // IINA can have multiple mpv instances (one per window), each with
+            // its own IPC socket. We query `pause` and `path` on each socket
+            // and pick the one that is NOT paused.
+            if let playingPath = Self.queryMpvPlayingPath(pid: pid) {
+                let url = URL(fileURLWithPath: playingPath)
+                if let metadata = AudioMetadataReader.read(url: url) {
+                    bestCandidate = (url, metadata)
+                    continue
                 }
-                continue
             }
 
-            // PRIORITY 2: Fall back to lsof fd-count heuristic when IPC fails
-            // (e.g. IINA too old, IPC disabled, or property unavailable).
+            // PRIORITY 2: Fall back to lsof fd-count heuristic when IPC fails.
             guard let output = Self.runLsof(pid: pid) else { continue }
             let home = FileManager.default.homeDirectoryForCurrentUser
             let mediaWithCounts = LsofMediaPathParser.mediaPathsWithFdCounts(from: output, homeDirectory: home)
 
             for (url, _) in mediaWithCounts {
-                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
-                if bestCandidate == nil {
-                    bestCandidate = (url, metadata, isPlaying)
-                } else if isPlaying && !bestCandidate!.isPlaying {
-                    bestCandidate = (url, metadata, isPlaying)
+                if let metadata = AudioMetadataReader.read(url: url) {
+                    if bestCandidate == nil {
+                        bestCandidate = (url, metadata)
+                    }
+                    break
                 }
             }
         }
@@ -202,6 +198,15 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
     }
 
     private func emitCandidate(url: URL, metadata: AudioMetadata, now: Date) {
+        // When the playing file changes, clear the debug track history so old
+        // songs from previous playback don't clutter the menu.
+        if lastEmittedPath != nil && lastEmittedPath != url.path {
+            DispatchQueue.main.async {
+                LogStreamer.shared.recentTracks.removeAll()
+            }
+        }
+        lastEmittedPath = url.path
+
         let stat = CMPlayerStats(
             sampleRate: metadata.sampleRate,
             bitDepth: metadata.bitDepth ?? 24,
@@ -274,27 +279,59 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
         return true
     }
 
-    /// Queries mpv IPC for the `path` property — the exact file currently being
-    /// played. Returns nil if IPC is unavailable or the property is unavailable
-    /// (e.g. idle state, no file loaded).
+    /// Queries mpv IPC for the `path` property of the **actively playing**
+    /// (non-paused) mpv instance. IINA can have multiple mpv instances (one per
+    /// window), each with its own IPC socket. We query `pause` and `path` on
+    /// each socket and return the path from the one that is NOT paused.
+    /// Returns nil if no playing instance is found.
     static func queryMpvPlayingPath(pid: pid_t) -> String? {
         guard let sockets = findMpvSockets(forPid: pid), !sockets.isEmpty else {
             return nil
         }
+
+        var fallbackPath: String?
+
         for socket in sockets {
-            let response = queryMpvIPC(socketPath: socket, property: "path")
-            if let data = response.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let path = json["data"] as? String,
-               !path.isEmpty {
-                // Expand ~ to home directory.
-                if path.hasPrefix("~") {
-                    return FileManager.default.homeDirectoryForCurrentUser.path + String(path.dropFirst())
-                }
-                return path
+            // Check if this instance is paused.
+            let pauseResponse = queryMpvIPC(socketPath: socket, property: "pause")
+            let isPaused = parseBoolProperty(from: pauseResponse, key: "data")
+
+            // Get the path for this instance.
+            let pathResponse = queryMpvIPC(socketPath: socket, property: "path")
+            let path = parseStringProperty(from: pathResponse, key: "data")
+
+            if isPaused == false, let path = path, !path.isEmpty {
+                // This instance is actively playing — return its path immediately.
+                return expandPath(path)
+            }
+
+            // Keep the first non-empty path as a fallback in case all
+            // instances report as paused (e.g. during a brief transition).
+            if fallbackPath == nil, let path = path, !path.isEmpty {
+                fallbackPath = expandPath(path)
             }
         }
-        return nil
+
+        return fallbackPath
+    }
+
+    private static func expandPath(_ path: String) -> String {
+        if path.hasPrefix("~") {
+            return FileManager.default.homeDirectoryForCurrentUser.path + String(path.dropFirst())
+        }
+        return path
+    }
+
+    private static func parseBoolProperty(from json: String, key: String) -> Bool? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj[key] as? Bool
+    }
+
+    private static func parseStringProperty(from json: String, key: String) -> String? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj[key] as? String
     }
 
     /// Finds mpv IPC socket paths for a given IINA PID by listing /tmp and
