@@ -35,7 +35,7 @@ class OutputDevices: ObservableObject {
     
     private var processQueue = DispatchQueue(label: "processQueue", qos: .userInitiated)
     
-    private var previousSampleRate: Float64?
+    var previousSampleRate: Float64?
     private var lastDetectedSampleRate: Float64?
     
     private var heartbeatCancellable: AnyCancellable?
@@ -108,20 +108,32 @@ class OutputDevices: ObservableObject {
         enableBitDepthDetectionCancellable = Defaults.shared.$userPreferBitDepthDetection.sink(receiveValue: { newValue in
             self.enableBitDepthDetection = newValue
         })
-        
+
+        self.startLogStreamer()
+
+        self.startHeartbeat()
+        self.startMusicAppMonitoring()
+    }
+
+    /// Starts the `LogStreamer` and subscribes to its `latestStats` publisher.
+    /// Extracted as an overridable method so test subclasses can suppress the
+    /// real log stream (and provider side effects) to keep tests deterministic.
+    func startLogStreamer() {
         if #available(macOS 15.0, *) {
+            // Register the IINA local-file provider before starting the log
+            // stream. Provider registration is idempotent (guarded by
+            // `registeredProviderIDs`), so repeated `OutputDevices` construction
+            // in tests will not stack duplicate providers.
+            LogStreamer.shared.register(provider: IINAOpenFileProvider())
             LogStreamer.shared.start()
         }
-        
+
         logStreamerCancellable = LogStreamer.shared.$latestStats
             .dropFirst()
             .receive(on: processQueue)
             .sink { [weak self] _ in
                 self?.switchLatestSampleRate()
             }
-        
-        self.startHeartbeat()
-        self.startMusicAppMonitoring()
     }
     
     func startMusicAppMonitoring() {
@@ -405,7 +417,7 @@ class OutputDevices: ObservableObject {
             }
             self.currentSampleRate = readableSampleRate
 
-            if let bitDepth = bitDepth, bitDepth > 0 {
+            if let bitDepth = bitDepth, bitDepth > 0, self.currentBitDepth != bitDepth {
                 self.currentBitDepth = bitDepth
             }
         }

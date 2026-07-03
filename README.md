@@ -33,6 +33,19 @@
    - 作为备用检测源
    - 提供基本的采样率信息
 
+4. **IINA 本地文件检测（新增）**
+   - 直接读取 IINA 当前打开的本地媒体文件元数据
+   - 支持 FLAC/WAV/AIFF/M4A/MP3/OGG/Opus 等格式
+   - **无需配置 IINA 的 `audio-exclusive` 或 `audio-device` 选项**
+   - 通过 `lsof` 发现 IINA 进程打开的文件，使用 AVFoundation 读取采样率
+   - 优先级最高（7），当 IINA 播放本地文件时优先使用文件元数据
+
+5. **浏览器/YouTube Music 检测（新增）**
+   - 解析 Safari/Chrome/Brave/Edge/Arc/Firefox 的 CoreMedia/CoreAudio 日志
+   - 仅当日志中包含可解析的采样率时才触发切换
+   - **未知采样率不会触发切换**，避免误切换
+   - 优先级为 3，高于通用 CoreMedia 日志但低于 CoreAudio Apple Lossless
+
 ### 主要特性
 
 - 🎵 **通用兼容**：支持所有音频播放器，不限于 Apple Music
@@ -58,6 +71,8 @@
 
 - ⚠️ 本版本**不显示曲目信息**（歌名、艺术家等），仅专注于采样率切换
 - ✅ 相比原版更轻量，功耗更低
+- 🎬 **IINA 本地文件检测**：通过读取 IINA 进程打开的文件元数据来检测采样率。无需配置 IINA 的 `audio-exclusive` 或 `audio-device` 选项。DRM/流媒体/网络内容可能无法暴露源文件采样率。
+- 🌐 **浏览器/YouTube Music 检测**：依赖 CoreMedia/CoreAudio 日志中暴露的采样率。如果浏览器仅输出混合/重采样的系统输出或没有采样率日志，LosslessSwitcher 不会切换。未知采样率会被忽略以防止随机切换。
 
 ### 版本信息
 
@@ -100,6 +115,19 @@ The application detects audio sample rates through:
    - Serves as a fallback detection source
    - Provides basic sample rate information
 
+4. **IINA Local File Detection (New)**
+   - Reads audio metadata directly from the media file IINA has open
+   - Supports FLAC/WAV/AIFF/M4A/MP3/OGG/Opus and other AVFoundation-supported formats
+   - **No IINA `audio-exclusive` or `audio-device` mpv options required**
+   - Discovers open files via `lsof` and reads sample rate using AVFoundation
+   - Highest priority (7) — file metadata takes precedence when IINA plays a local file
+
+5. **Browser/YouTube Music Detection (New)**
+   - Parses CoreMedia/CoreAudio log lines from Safari, Chrome, Brave, Edge, Arc, and Firefox
+   - Switches only when the log line contains a parseable sample rate in the supported range (8 kHz–384 kHz)
+   - **Unknown sample rates are ignored** to prevent false/random switching
+   - Priority 3 — above generic CoreMedia logs but below CoreAudio Apple Lossless
+
 ### Key Features
 
 - 🎵 **Universal Compatibility**: Supports all audio players, not limited to Apple Music
@@ -125,6 +153,8 @@ The application detects audio sample rates through:
 
 - ⚠️ This version **does not display track information** (song name, artist, etc.), focusing solely on sample rate switching
 - ✅ More lightweight and lower power consumption compared to the original
+- 🎬 **IINA local file detection**: Works by reading the audio metadata of the file IINA has open. No IINA `audio-exclusive` or `audio-device` configuration is required. DRM/streamed/network-only content may not expose the source file's sample rate.
+- 🌐 **Browser/YouTube Music detection**: Depends on CoreMedia/CoreAudio sample-rate logs being emitted by the browser. If the browser only outputs mixed/resampled system audio or no sample-rate log, LosslessSwitcher will not switch. Unknown rates are ignored to prevent random switching.
 
 ### Version Information
 

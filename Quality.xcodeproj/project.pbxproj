@@ -40,6 +40,13 @@
 		ECFEB1CD2F67D0E900785AE6 /* LogStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA1B2C3D4E5F60100000001 /* LogStreamer.swift */; };
 		ECFEB1CE2F67D0E900785AE6 /* SampleRatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA1B2C3D4E5F60200000001 /* SampleRatePolicy.swift */; };
 		ECFEB1CF2F67D0E900785AE6 /* LogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA1B2C3D4E5F60300000001 /* LogParser.swift */; };
+		F1A1B2C3D4E5F6A200000001 /* AudioSampleRateProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000001 /* AudioSampleRateProvider.swift */; };
+		F1A1B2C3D4E5F6A200000002 /* DetectionCandidateReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000002 /* DetectionCandidateReducer.swift */; };
+		F1A1B2C3D4E5F6A200000003 /* AudioMetadataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000003 /* AudioMetadataReader.swift */; };
+		F1A1B2C3D4E5F6A200000004 /* IINAOpenFileProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000004 /* IINAOpenFileProvider.swift */; };
+		F1A1B2C3D4E5F6A300000005 /* AudioMetadataReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000005 /* AudioMetadataReaderTests.swift */; };
+		F1A1B2C3D4E5F6A300000006 /* IINAOpenFileProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000006 /* IINAOpenFileProviderTests.swift */; };
+		F1A1B2C3D4E5F6A300000007 /* BrowserLogParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A1B2C3D4E5F6A100000007 /* BrowserLogParserTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -96,6 +103,13 @@
 		BFA1B2C3D4E5F60400000001 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		BFA1B2C3D4E5F60500000001 /* Logger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logger.swift; sourceTree = "<group>"; };
 		DEADB921F53E47ABA955B3E3 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		F1A1B2C3D4E5F6A100000001 /* AudioSampleRateProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSampleRateProvider.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000002 /* DetectionCandidateReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetectionCandidateReducer.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000003 /* AudioMetadataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioMetadataReader.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000004 /* IINAOpenFileProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IINAOpenFileProvider.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000005 /* AudioMetadataReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioMetadataReaderTests.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000006 /* IINAOpenFileProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IINAOpenFileProviderTests.swift; sourceTree = "<group>"; };
+		F1A1B2C3D4E5F6A100000007 /* BrowserLogParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserLogParserTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -149,6 +163,7 @@
 		1272AA96280DBB4900FD72BA /* Quality */ = {
 			isa = PBXGroup;
 			children = (
+				F1A1B2C3D4E5F6A400000001 /* Detection */,
 				BFA1B2C3D4E5F60500000001 /* Logger.swift */,
 				BFA1B2C3D4E5F60400000001 /* AppConfig.swift */,
 				BFA1B2C3D4E5F60100000001 /* LogStreamer.swift */,
@@ -187,10 +202,24 @@
 			path = "Preview Content";
 			sourceTree = "<group>";
 		};
+		F1A1B2C3D4E5F6A400000001 /* Detection */ = {
+			isa = PBXGroup;
+			children = (
+				F1A1B2C3D4E5F6A100000001 /* AudioSampleRateProvider.swift */,
+				F1A1B2C3D4E5F6A100000002 /* DetectionCandidateReducer.swift */,
+				F1A1B2C3D4E5F6A100000003 /* AudioMetadataReader.swift */,
+				F1A1B2C3D4E5F6A100000004 /* IINAOpenFileProvider.swift */,
+			);
+			path = Detection;
+			sourceTree = "<group>";
+		};
 		F0AA751A88794AC88F7762E6 /* LosslessSwitcherTests */ = {
 			isa = PBXGroup;
 			children = (
 				61E764AF84A24EBA81590227 /* OutputDevicesPrebufferTests.swift */,
+				F1A1B2C3D4E5F6A100000005 /* AudioMetadataReaderTests.swift */,
+				F1A1B2C3D4E5F6A100000006 /* IINAOpenFileProviderTests.swift */,
+				F1A1B2C3D4E5F6A100000007 /* BrowserLogParserTests.swift */,
 			);
 			path = LosslessSwitcherTests;
 			sourceTree = "<group>";
@@ -326,6 +355,10 @@
 				1272AA98280DBB4900FD72BA /* QualityApp.swift in Sources */,
 				BF342D802E0947890032F398 /* SampleRateLabel.swift in Sources */,
 				127C972D281FCF000087313B /* AppVersion.swift in Sources */,
+				F1A1B2C3D4E5F6A200000001 /* AudioSampleRateProvider.swift in Sources */,
+				F1A1B2C3D4E5F6A200000002 /* DetectionCandidateReducer.swift in Sources */,
+				F1A1B2C3D4E5F6A200000003 /* AudioMetadataReader.swift in Sources */,
+				F1A1B2C3D4E5F6A200000004 /* IINAOpenFileProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -333,12 +366,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				ECFEB1CB2F67D0E900785AE6 /* Logger.swift in Sources */,
-				ECFEB1CC2F67D0E900785AE6 /* AppConfig.swift in Sources */,
-				ECFEB1CD2F67D0E900785AE6 /* LogStreamer.swift in Sources */,
-				ECFEB1CE2F67D0E900785AE6 /* SampleRatePolicy.swift in Sources */,
-				ECFEB1CF2F67D0E900785AE6 /* LogParser.swift in Sources */,
 				A992D9690EDD4353BA7F1C53 /* OutputDevicesPrebufferTests.swift in Sources */,
+				F1A1B2C3D4E5F6A300000005 /* AudioMetadataReaderTests.swift in Sources */,
+				F1A1B2C3D4E5F6A300000006 /* IINAOpenFileProviderTests.swift in Sources */,
+				F1A1B2C3D4E5F6A300000007 /* BrowserLogParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

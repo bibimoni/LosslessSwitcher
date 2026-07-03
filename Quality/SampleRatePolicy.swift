@@ -42,6 +42,31 @@ class SampleRatePolicy: ObservableObject {
 
     private init() {}
 
+#if DEBUG
+    /// Resets all mutable state so tests start from a clean slate. Without this,
+    /// the singleton's `lastTrackChangeDate`, `isMusicPlaying`, and pending
+    /// downgrade fields leak across test cases and produce non-deterministic
+    /// results.
+    func resetStateForTests() {
+        lastTrackChangeDate = Date.distantPast
+        lastKnownTrackID = nil
+        lastKnownTrackName = nil
+        currentTrackPlayedTime = 0
+        lastPlaybackSnapshot = nil
+        isMusicPlaying = false
+        pendingNextTrackStat = nil
+        pendingNextTrackStatLastSeen = nil
+        pendingMusicDowngradeStat = nil
+        pendingMusicDowngradeDetectedAt = nil
+        pendingMusicDowngradeLastSeen = nil
+        lastMusicLogAt = nil
+        lastMusicHighRateAt = nil
+        lastProcessedGeneration = 0
+        lastProcessedStatDate = nil
+        lastDetectedSampleRate = nil
+    }
+#endif
+
     @discardableResult
     func updateMusicState(isPlaying: Bool, trackID: String?, trackName: String?) -> Bool {
         let wasPlaying = self.isMusicPlaying
