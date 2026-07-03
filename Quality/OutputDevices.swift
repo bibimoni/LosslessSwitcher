@@ -231,7 +231,7 @@ class OutputDevices: ObservableObject {
     func switchLatestSampleRate(recursion: Bool = false) {
         // 1. 尝试从实时流获取最新状态
         var bestStat = LogStreamer.shared.latestStats
-        
+
         // 2. 如果实时流没有，或者数据太旧，回退到历史查询（OSLogStore）
         if bestStat == nil || abs(bestStat!.date.timeIntervalSinceNow) > 10 {
             let allStats = self.getAllStats()
@@ -239,12 +239,12 @@ class OutputDevices: ObservableObject {
                 bestStat = first
             }
         }
-        
+
         guard let stat = bestStat else { return }
-        
+
         // 3. 使用策略引擎进行决策
         let result = SampleRatePolicy.shared.evaluate(currentHz: self.previousSampleRate ?? 0, latestStat: stat)
-        
+
         if result.shouldApply, let finalStat = result.stat {
             self.applySampleRate(stat: finalStat, recursion: recursion, bypassDowngradeProtection: result.bypassDowngradeProtection)
         }
@@ -253,7 +253,7 @@ class OutputDevices: ObservableObject {
     private func applySampleRate(stat: CMPlayerStats, recursion: Bool, bypassDowngradeProtection: Bool = false) {
         let first = stat
         let defaultDevice = self.selectedOutputDevice ?? self.defaultOutputDevice
-        
+
         guard let supported = defaultDevice?.nominalSampleRates else { return }
             
         let sampleRate = Float64(first.sampleRate)

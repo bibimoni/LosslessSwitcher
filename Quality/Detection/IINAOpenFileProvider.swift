@@ -32,23 +32,33 @@ struct LsofMediaPathParser {
     /// Subtitle extensions that should never be treated as audio sources.
     static let subtitleExtensions: Set<String> = ["srt", "ass", "ssa", "vtt", "sub"]
 
-    /// Parses `lsof -Fn` output into media-file URLs.
+    /// Parses `lsof -Fn` output into media-file URLs. Accepts an optional
+    /// `lsof -Ffn` output (with fd numbers) to sort by highest fd number —
+    /// the most recently opened file has the highest fd.
     /// - Parameters:
-    ///   - output: Raw stdout of `lsof -Fn -p <pid>`.
-    ///   - homeDirectory: The home directory used to expand `~`-prefixed paths
-    ///     that lsof sometimes emits. Pass `FileManager.default.homeDirectoryForCurrentUser`.
-    /// - Returns: Distinct media-file URLs, in the order they first appeared.
+    ///   - output: Raw stdout of `lsof -Fn -p <pid>` or `lsof -Ffn -p <pid>`.
+    ///   - homeDirectory: The home directory used to expand `~`-prefixed paths.
+    /// - Returns: Media-file URLs. When fd info is present, sorted by highest fd
+    ///   descending (most recently opened first). Otherwise, in first-seen order.
     static func mediaPaths(from output: String, homeDirectory: URL) -> [URL] {
+        // Check if output includes fd numbers (lines starting with 'f').
+        let hasFdInfo = output.contains("\nf")
+        var fdToPath: [(fd: Int, path: String)] = []
         var seen = Set<String>()
-        var results: [URL] = []
+        var orderedResults: [URL] = []
+
+        var currentFd: Int?
 
         for line in output.components(separatedBy: .newlines) {
-            // `lsof -Fn` prefixes file paths with `n`.
+            if line.hasPrefix("f") {
+                // File descriptor number line.
+                currentFd = Int(line.dropFirst())
+                continue
+            }
             guard line.hasPrefix("n") else { continue }
             let raw = String(line.dropFirst())
             if raw.isEmpty { continue }
 
-            // Expand a leading `~` to the supplied home directory.
             let expanded: String
             if raw.hasPrefix("~") {
                 expanded = homeDirectory.path + String(raw.dropFirst())
@@ -56,22 +66,34 @@ struct LsofMediaPathParser {
                 expanded = raw
             }
 
-            // Skip IINA-internal resources.
             if excludedPathPrefixes.contains(where: { expanded.hasPrefix($0) }) { continue }
 
-            // Skip subtitle-only files.
             let pathExtension = (expanded as NSString).pathExtension.lowercased()
             if pathExtension.isEmpty { continue }
             if subtitleExtensions.contains(pathExtension) { continue }
             guard mediaExtensions.contains(pathExtension) else { continue }
 
-            // De-duplicate by path string.
-            if seen.contains(expanded) { continue }
-            seen.insert(expanded)
-            results.append(URL(fileURLWithPath: expanded))
+            if hasFdInfo, let fd = currentFd {
+                // Track the highest fd per path.
+                if let existingIndex = fdToPath.firstIndex(where: { $0.path == expanded }) {
+                    if fd > fdToPath[existingIndex].fd {
+                        fdToPath[existingIndex].fd = fd
+                    }
+                } else {
+                    fdToPath.append((fd: fd, path: expanded))
+                }
+            } else {
+                if seen.contains(expanded) { continue }
+                seen.insert(expanded)
+                orderedResults.append(URL(fileURLWithPath: expanded))
+            }
         }
 
-        return results
+        if hasFdInfo {
+            // Sort by fd descending — most recently opened file first.
+            return fdToPath.sorted { $0.fd > $1.fd }.map { URL(fileURLWithPath: $0.path) }
+        }
+        return orderedResults
     }
 }
 
@@ -132,13 +154,21 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
             self?.lastEmittedSampleRate = nil
             self?.lastEmittedBitDepth = nil
             self?.lastEmittedAt = nil
+            self?.previousPaths.removeAll()
         }
     }
+
+    // Track previously-seen file paths so we only emit candidates for newly
+    // opened files — not every file IINA keeps in its playlist.
+    private var previousPaths: Set<String> = []
 
     private func pollOnce() {
         let now = Date()
         let pids = Self.runningIINAPIDs()
-        guard !pids.isEmpty else { return }
+        guard !pids.isEmpty else {
+            previousPaths.removeAll()
+            return
+        }
 
         for pid in pids {
             if let last = lastLsofAt[pid], now.timeIntervalSince(last) < Self.lsofInterval {
@@ -148,12 +178,13 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
 
             guard let output = Self.runLsof(pid: pid) else { continue }
             let home = FileManager.default.homeDirectoryForCurrentUser
-            let mediaPaths = LsofMediaPathParser.mediaPaths(from: output, homeDirectory: home)
-            for url in mediaPaths {
-                guard let metadata = AudioMetadataReader.read(url: url) else { continue }
-                emitCandidate(url: url, metadata: metadata, now: now)
-                break
-            }
+            let mediaURLs = LsofMediaPathParser.mediaPaths(from: output, homeDirectory: home)
+            // mediaPaths is sorted by highest fd first — the most recently
+            // opened file is the one IINA is currently playing.
+            guard let url = mediaURLs.first else { continue }
+            guard let metadata = AudioMetadataReader.read(url: url) else { continue }
+            emitCandidate(url: url, metadata: metadata, now: now)
+            break
         }
     }
 
@@ -201,11 +232,13 @@ final class IINAOpenFileProvider: AudioSampleRateProvider {
         return apps.compactMap { $0.processIdentifier }
     }
 
-    /// Runs `/usr/sbin/lsof -Fn -p <pid>` and returns its stdout, or nil on failure.
+    /// Runs `/usr/sbin/lsof -Ffn -p <pid>` and returns its stdout, or nil on failure.
+    /// Uses `-Ffn` to get both file descriptor numbers and file paths, so the
+    /// parser can sort by highest fd (most recently opened file first).
     static func runLsof(pid: pid_t) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-Fn", "-p", String(pid)]
+        process.arguments = ["-Ffn", "-p", String(pid)]
 
         let pipe = Pipe()
         process.standardOutput = pipe

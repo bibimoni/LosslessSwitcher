@@ -186,15 +186,14 @@ class SampleRatePolicy: ObservableObject {
                 // 升频：直接放行
                 pendingMusicDowngradeStat = nil
                 pendingMusicDowngradeDetectedAt = nil
+                pendingMusicDowngradeLastSeen = nil
                 return PolicyResult(shouldApply: true, stat: first, bypassDowngradeProtection: true, reason: "Immediate upgrade allowed within 60s window")
             } else if first.sampleRate < currentHz - 100 {
                 // 降频
                 if isTrackJustChangedWindow {
-                    // 切歌初期的 3 秒内，无视降级保护以保证体验
                     return PolicyResult(shouldApply: true, stat: first, bypassDowngradeProtection: true, reason: "Immediate downgrade on track change")
                 }
-                
-                // 不在切歌初期，可能是在高码率歌曲播放中突发的虚假低码率日志（日志抖动），需走确认逻辑
+
                 let isNewPending = pendingMusicDowngradeStat == nil || abs((pendingMusicDowngradeStat?.sampleRate ?? 0) - first.sampleRate) > 1
                 if isNewPending {
                     pendingMusicDowngradeStat = first
@@ -202,20 +201,27 @@ class SampleRatePolicy: ObservableObject {
                     pendingMusicDowngradeLastSeen = now
                     return PolicyResult(shouldApply: false, stat: nil, bypassDowngradeProtection: false, reason: "Starting downgrade confirmation window")
                 }
-                
+
                 if let detectedAt = pendingMusicDowngradeDetectedAt, now.timeIntervalSince(detectedAt) >= AppConfig.Music.downgradeConfirmWindow {
                     pendingMusicDowngradeStat = nil
                     pendingMusicDowngradeDetectedAt = nil
+                    pendingMusicDowngradeLastSeen = nil
                     return PolicyResult(shouldApply: true, stat: first, bypassDowngradeProtection: false, reason: "Downgrade confirmed")
                 }
                 return PolicyResult(shouldApply: false, stat: nil, bypassDowngradeProtection: false, reason: "Confirming downgrade...")
             } else {
-                // 采样率一致
                 pendingMusicDowngradeStat = nil
                 pendingMusicDowngradeDetectedAt = nil
+                pendingMusicDowngradeLastSeen = nil
             }
         }
-        
+
+        // Non-music high-priority sources (IINA local file, priority >= 7) have
+        // reliable file metadata, so bypass downgrade protection entirely.
+        if !isMusicStat && !isMusicPlaying && first.priority >= 7 {
+            return PolicyResult(shouldApply: true, stat: first, bypassDowngradeProtection: true, reason: "High-priority non-music source bypasses downgrade protection")
+        }
+
         return PolicyResult(shouldApply: true, stat: first, bypassDowngradeProtection: false, reason: "Standard application")
     }
     
